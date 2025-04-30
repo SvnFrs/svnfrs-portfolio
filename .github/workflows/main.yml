@@ -72,7 +72,10 @@ jobs:
             CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
             EOF
 
-            # Copy the docker-compose file content (fix backtick escaping)
+            # Also copy environment file to .docker directory for convenience
+            cp .env .docker/.env
+
+            # Copy the docker-compose file content
             cat > .docker/compose.yaml << 'EOF'
             services:
               svnfrs-cloudflare-tunnel:
@@ -167,50 +170,20 @@ jobs:
                 driver: bridge
             EOF
 
-            # Print debug info - Print the compose file
-            echo "--- Compose File Content ---"
-            cat .docker/compose.yaml
-            echo "--- End Compose File Content ---"
-
-            # Print environment variables
-            echo "--- Environment Variables ---"
+            # Print debug info
+            echo "=== Environment Variables ==="
             cat .env
-            echo "--- End Environment Variables ---"
 
-            # Try running with docker compose (preferred)
-            if command -v docker-compose &> /dev/null; then
-              echo "Using docker-compose command..."
+            # Login to GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-              # Login to GitHub Container Registry
-              echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Run docker compose with the explicit env-file flag
+            echo "=== Starting Services ==="
+            sudo docker compose -f .docker/compose.yaml --env-file .env --profile prod up -d
 
-              # Run docker-compose pull and up
-              docker-compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
-              docker-compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
-            elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
-              echo "Using docker compose command..."
-
-              # Login to GitHub Container Registry
-              echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-              # Run docker compose pull and up
-              docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
-              docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
-            else
-              echo "Neither docker-compose nor docker compose is available!"
-              exit 1
-            fi
-
-            # Verify containers are running
-            echo "--- Docker Containers ---"
-            docker ps
-            echo "--- End Docker Containers ---"
-
-            # Check logs if containers aren't running
-            echo "--- Docker Compose Logs ---"
-            cd ~/portfolio-deployment
-            docker compose -f .docker/compose.yaml -p svnfrs-portfolio logs
-            echo "--- End Docker Compose Logs ---"
+            # Check running containers
+            echo "=== Running Containers ==="
+            sudo docker ps
 
             # Clean up unused images
-            docker system prune -af
+            sudo docker system prune -af
