@@ -16,6 +16,7 @@ WORKDIR /app
 RUN addgroup --system --gid 1001 svnfrs
 RUN adduser --system --uid 1001 svnfrs
 USER svnfrs
+
 COPY --from=installer --chown=svnfrs:svnfrs /installer/.next/standalone ./
 COPY --from=installer --chown=svnfrs:svnfrs /installer/.next/static ./.next/static
 COPY --from=installer --chown=svnfrs:svnfrs /installer/public ./public
