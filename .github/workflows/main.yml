@@ -41,13 +41,25 @@ jobs:
     needs: build-image
     env:
       GIT_REGISTRY: ghcr.io/${{ github.repository }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Convert REGISTRY to lowercase
         run: echo "REGISTRY=$(echo $GIT_REGISTRY | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Create GitHub Token File
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" > github_token.txt
+
+      - name: Copy GitHub Token to EC2
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          source: "github_token.txt"
+          target: "~/portfolio-deployment"
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@master
@@ -62,6 +74,18 @@ jobs:
             # Pull the latest code
             cd ~/portfolio-deployment
             echo "${{ env.REGISTRY }}" > .registry
+
+            # Store GitHub credentials properly
+            GITHUB_TOKEN=$(cat github_token.txt)
+
+            # Create Docker config directory if it doesn't exist
+            mkdir -p ~/.docker
+
+            # Create proper Docker credential configuration
+            echo "{\"auths\":{\"ghcr.io\":{\"auth\":\"$(echo -n "${{ github.actor }}:${GITHUB_TOKEN}" | base64)\"}}}" > ~/.docker/config.json
+
+            # Secure the token file
+            rm github_token.txt
 
             # Create/update environment file
             cat > .env << EOF
@@ -147,17 +171,19 @@ jobs:
 
               svnfrs-portfolio:
                 container_name: svnfrs-portfolio
-                image: ${REGISTRY}/svnfrs-portfolio:latest
+                image: "${REGISTRY}/svnfrs-portfolio:latest"
                 restart: always
+                ports:
+                  - "3000:3000"  # Expose port directly for testing
                 labels:
                   - "traefik.enable=true"
                   - "traefik.docker.network=svnfrs-networks"
                   - "traefik.constraint=proxy-public"
-                  - "traefik.http.routers.svnfrs-portfolio.rule=Host(\\`${ROOT_DOMAIN}\\`)"
+                  - "traefik.http.routers.svnfrs-portfolio.rule=Host(`${ROOT_DOMAIN}`)"
                   - "traefik.http.routers.svnfrs-portfolio.entrypoints=web"
                   - "traefik.http.services.svnfrs-portfolio.loadbalancer.server.port=3000"
                 networks:
-                  svnfrs-networks:
+                  - svnfrs-networks
                 profiles:
                   - prod
 
@@ -170,12 +196,15 @@ jobs:
                 driver: bridge
             EOF
 
-            # Print debug info
-            echo "=== Environment Variables ==="
-            cat .env
+            # Login to GitHub Container Registry with proper method
+            echo "${GITHUB_TOKEN}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-            # Login to GitHub Container Registry
-            echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Copy docker config to root user for sudo operations
+            sudo cp ~/.docker/config.json /root/.docker/config.json || sudo mkdir -p /root/.docker && sudo cp ~/.docker/config.json /root/.docker/config.json
+
+            # Try to pull your image directly to verify it works
+            echo "=== Testing Image Pull ==="
+            sudo docker pull ${REGISTRY}/svnfrs-portfolio:latest
 
             # Run docker compose with the explicit env-file flag
             echo "=== Starting Services ==="
@@ -184,6 +213,3 @@ jobs:
             # Check running containers
             echo "=== Running Containers ==="
             sudo docker ps
-
-            # Clean up unused images
-            sudo docker system prune -af
