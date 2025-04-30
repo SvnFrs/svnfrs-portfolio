@@ -1,0 +1,10 @@
+services:
+  svnfrs-portfolio:
+    image: ${REGISTRY}/svnfrs-portfolio:latest
+    build:
+      context: ../fe
+      dockerfile: Dockerfile
+
+    profiles:
+      - build
+      - client
