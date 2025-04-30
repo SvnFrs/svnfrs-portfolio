@@ -72,7 +72,7 @@ jobs:
             CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
             EOF
 
-            # Copy the docker-compose file content
+            # Copy the docker-compose file content (fix backtick escaping)
             cat > .docker/compose.yaml << 'EOF'
             services:
               svnfrs-cloudflare-tunnel:
@@ -150,7 +150,7 @@ jobs:
                   - "traefik.enable=true"
                   - "traefik.docker.network=svnfrs-networks"
                   - "traefik.constraint=proxy-public"
-                  - "traefik.http.routers.svnfrs-portfolio.rule=Host(\`${ROOT_DOMAIN}\`)"
+                  - "traefik.http.routers.svnfrs-portfolio.rule=Host(\\`${ROOT_DOMAIN}\\`)"
                   - "traefik.http.routers.svnfrs-portfolio.entrypoints=web"
                   - "traefik.http.services.svnfrs-portfolio.loadbalancer.server.port=3000"
                 networks:
@@ -167,42 +167,50 @@ jobs:
                 driver: bridge
             EOF
 
-            # Verify Docker is installed and running
-            if ! command -v docker &> /dev/null; then
-              echo "Docker not found. Installing Docker..."
-              sudo apt update
-              sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-              sudo systemctl start docker
-              sudo systemctl enable docker
-              sudo usermod -aG docker $USER
-              echo "Docker installed. You may need to log out and back in for group changes to take effect."
-            fi
+            # Print debug info - Print the compose file
+            echo "--- Compose File Content ---"
+            cat .docker/compose.yaml
+            echo "--- End Compose File Content ---"
 
-            # Verify socket permissions
-            if [ ! -S /var/run/docker.sock ]; then
-              echo "Docker socket not found. Checking if Docker is running..."
-              sudo systemctl status docker
-              echo "Attempting to start Docker..."
-              sudo systemctl start docker
-            fi
+            # Print environment variables
+            echo "--- Environment Variables ---"
+            cat .env
+            echo "--- End Environment Variables ---"
 
-            # Check if we can access Docker without sudo
-            if ! docker info &> /dev/null; then
-              echo "Using sudo for Docker commands due to permission issues..."
+            # Try running with docker compose (preferred)
+            if command -v docker-compose &> /dev/null; then
+              echo "Using docker-compose command..."
 
-              # Login to GitHub Container Registry with sudo
-              echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-              # Pull and deploy with sudo
-              sudo docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
-              sudo docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
-
-              # Clean up with sudo
-              sudo docker system prune -af
-            else
-              # Normal flow if permissions are correct
+              # Login to GitHub Container Registry
               echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+              # Run docker-compose pull and up
+              docker-compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
+              docker-compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
+            elif command -v docker &> /dev/null && docker compose version &> /dev/null; then
+              echo "Using docker compose command..."
+
+              # Login to GitHub Container Registry
+              echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+              # Run docker compose pull and up
               docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
               docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
-              docker system prune -af
+            else
+              echo "Neither docker-compose nor docker compose is available!"
+              exit 1
             fi
+
+            # Verify containers are running
+            echo "--- Docker Containers ---"
+            docker ps
+            echo "--- End Docker Containers ---"
+
+            # Check logs if containers aren't running
+            echo "--- Docker Compose Logs ---"
+            cd ~/portfolio-deployment
+            docker compose -f .docker/compose.yaml -p svnfrs-portfolio logs
+            echo "--- End Docker Compose Logs ---"
+
+            # Clean up unused images
+            docker system prune -af
