@@ -31,9 +31,39 @@ jobs:
       - name: Convert REGISTRY to lowercase
         run: echo "REGISTRY=$(echo $GIT_REGISTRY | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
+      # Clean up untagged images
+      - name: Clean up old images
+        run: |
+          # Get package name
+          PACKAGE_NAME="svnfrs-portfolio"
+
+          # Authenticate with GitHub API
+          echo "Authenticating with GitHub API..."
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          OWNER="${{ github.repository_owner }}"
+          PACKAGE_TYPE="container"
+
+          # Get list of package versions
+          echo "Getting list of package versions..."
+          VERSIONS_URL="https://api.github.com/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions"
+          VERSIONS=$(curl -s -H "Authorization: token ${TOKEN}" "${VERSIONS_URL}")
+
+          # Delete untagged versions (keep the latest 5)
+          echo "Finding and deleting old untagged images..."
+          echo "$VERSIONS" | jq -r '.[] | select(.metadata.container.tags | length == 0) | .id' | tail -n +6 | while read -r VERSION_ID; do
+            echo "Deleting version ${VERSION_ID}..."
+            curl -s -X DELETE -H "Authorization: token ${TOKEN}" "https://api.github.com/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions/${VERSION_ID}"
+          done
+
+          echo "Image cleanup completed."
+
       - name: Build and push Docker image
         run: |
-          docker compose -f .docker/compose.build.yaml --profile build build --parallel
+          # Clean local Docker cache
+          docker system prune -af
+
+          # Build and push new image
+          docker compose -f .docker/compose.build.yaml --profile build build --parallel --no-cache
           docker compose -f .docker/compose.build.yaml --profile build push
 
   deploy-website:
@@ -200,7 +230,13 @@ jobs:
             echo "${GITHUB_TOKEN}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
             # Copy docker config to root user for sudo operations
-            sudo cp ~/.docker/config.json /root/.docker/config.json || sudo mkdir -p /root/.docker && sudo cp ~/.docker/config.json /root/.docker/config.json
+            sudo mkdir -p /root/.docker
+            sudo cp ~/.docker/config.json /root/.docker/config.json
+
+            # Clean up existing containers and images
+            echo "=== Cleaning up existing resources ==="
+            sudo docker compose -f .docker/compose.yaml --env-file .env --profile prod down || true
+            sudo docker system prune -af
 
             # Try to pull your image directly to verify it works
             echo "=== Testing Image Pull ==="
@@ -213,3 +249,11 @@ jobs:
             # Check running containers
             echo "=== Running Containers ==="
             sudo docker ps
+
+            # Display logs if there's an issue
+            if ! sudo docker ps | grep svnfrs-portfolio; then
+              echo "=== Portfolio container failed to start - showing logs ==="
+              sudo docker logs svnfrs-portfolio || echo "No logs available"
+            else
+              echo "=== Portfolio container successfully started ==="
+            fi
