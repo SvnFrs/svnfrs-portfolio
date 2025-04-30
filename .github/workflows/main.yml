@@ -55,6 +55,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_PRIVATE_KEY }}
+          script_stop: true
           script: |
             # Prepare directory
             mkdir -p ~/portfolio-deployment/.docker
@@ -72,15 +73,123 @@ jobs:
             CLOUDFLARE_TUNNEL_TOKEN=${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
             EOF
 
-            # Copy the docker-compose file
+            # Copy the docker-compose file content
             cat > .docker/compose.yaml << 'EOF'
-            ${{ needs.build-image.outputs.compose_content }}
+            services:
+              svnfrs-cloudflare-tunnel:
+                container_name: svnfrs-cloudflare-tunnel
+                image: cloudflare/cloudflared
+                restart: unless-stopped
+                command: tunnel run
+                profiles:
+                  - prod
+                environment:
+                  - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+                networks:
+                  - svnfrs-traefik-internal
+
+              svnfrs-traefik:
+                container_name: svnfrs-traefik
+                image: traefik:v2.10
+                restart: always
+                command:
+                  - "--log"
+                  - "--entrypoints.web.address=:80"
+                  - "--entrypoints.websecure.address=:443"
+                  - "--api.dashboard=true"
+                  - "--api.insecure=true"
+                  - "--providers.docker=true"
+                  - "--providers.docker.exposedbydefault=false"
+                  - "--log.level=${LOG_LEVEL:-INFO}"
+                  - "--accesslog=true"
+                  - "--serversTransport.insecureSkipVerify=true"
+                ports:
+                  - "80:80"
+                  - "443:443"
+                profiles:
+                  - prod
+                volumes:
+                  - "/var/run/docker.sock:/var/run/docker.sock"
+                environment:
+                  - CF_DNS_API_TOKEN=${CF_API_TOKEN}
+                networks:
+                  - svnfrs-networks
+                  - svnfrs-traefik-internal
+
+              svnfrs-cloudflare-companion:
+                container_name: svnfrs-cloudflare-companion
+                image: ghcr.io/tiredofit/docker-traefik-cloudflare-companion:latest
+                volumes:
+                  - /var/run/docker.sock:/var/run/docker.sock
+                environment:
+                  - TIMEZONE=Asia/Ho_Chi_Minh
+                  - LOG_TYPE=CONSOLE
+                  - LOG_LEVEL=INFO
+                  - TRAEFIK_VERSION=2
+                  - RC_TYPE=CNAME
+                  - TARGET_DOMAIN=${ROOT_DOMAIN}
+                  - REFRESH_ENTRIES=TRUE
+                  - ENABLE_TRAEFIK_POLL=TRUE
+                  - TRAEFIK_POLL_URL=http://svnfrs-traefik/api
+                  - TRAEFIK_FILTER_LABEL=traefik.constraint
+                  - TRAEFIK_FILTER=proxy-public
+                  - CF_TOKEN=${CF_API_TOKEN}
+                  - DOMAIN1=${ROOT_DOMAIN}
+                  - DOMAIN1_ZONE_ID=${ZONE_ID}
+                  - DOMAIN1_PROXIED=TRUE
+                restart: always
+                networks:
+                  - svnfrs-traefik-internal
+                profiles:
+                  - prod
+
+              svnfrs-portfolio:
+                container_name: svnfrs-portfolio
+                image: ${REGISTRY}/svnfrs-portfolio:latest
+                restart: always
+                labels:
+                  - "traefik.enable=true"
+                  - "traefik.docker.network=svnfrs-networks"
+                  - "traefik.constraint=proxy-public"
+                  - "traefik.http.routers.svnfrs-portfolio.rule=Host(\`${ROOT_DOMAIN}\`)"
+                  - "traefik.http.routers.svnfrs-portfolio.entrypoints=web"
+                  - "traefik.http.services.svnfrs-portfolio.loadbalancer.server.port=3000"
+                networks:
+                  svnfrs-networks:
+                profiles:
+                  - prod
+
+            networks:
+              svnfrs-networks:
+                name: svnfrs_networks
+                driver: bridge
+              svnfrs-traefik-internal:
+                name: svnfrs_traefik_internal
+                driver: bridge
             EOF
 
-            # Pull images and deploy
-            docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-            docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
-            docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
+            # Fix Docker permissions if needed
+            if [[ ! -f "/var/run/docker.sock" ]]; then
+              echo "Docker socket not found. Please make sure Docker is installed."
+              exit 1
+            fi
 
-            # Clean up unused images
-            docker system prune -af
+            # Add current user to docker group if needed
+            if ! groups | grep -q docker; then
+              sudo usermod -aG docker $USER
+              echo "Added user to docker group. You may need to log out and log back in for this to take effect."
+            fi
+
+            # Pull images and deploy with sudo if needed
+            if ! docker info > /dev/null 2>&1; then
+              echo "Using sudo for docker commands..."
+              sudo docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+              sudo docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
+              sudo docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
+              sudo docker system prune -af
+            else
+              docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+              docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
+              docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
+              docker system prune -af
+            fi
