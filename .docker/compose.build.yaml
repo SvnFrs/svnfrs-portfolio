@@ -2,7 +2,7 @@ services:
   svnfrs-portfolio:
     image: ${REGISTRY}/svnfrs-portfolio:latest
     build:
-      context: ./
+      context: ../
       dockerfile: Dockerfile
 
     profiles:
