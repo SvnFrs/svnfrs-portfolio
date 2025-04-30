@@ -55,7 +55,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_PRIVATE_KEY }}
-          script_stop: true
           script: |
             # Prepare directory
             mkdir -p ~/portfolio-deployment/.docker
@@ -168,27 +167,41 @@ jobs:
                 driver: bridge
             EOF
 
-            # Fix Docker permissions if needed
-            if [[ ! -f "/var/run/docker.sock" ]]; then
-              echo "Docker socket not found. Please make sure Docker is installed."
-              exit 1
-            fi
-
-            # Add current user to docker group if needed
-            if ! groups | grep -q docker; then
+            # Verify Docker is installed and running
+            if ! command -v docker &> /dev/null; then
+              echo "Docker not found. Installing Docker..."
+              sudo apt update
+              sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              sudo systemctl start docker
+              sudo systemctl enable docker
               sudo usermod -aG docker $USER
-              echo "Added user to docker group. You may need to log out and log back in for this to take effect."
+              echo "Docker installed. You may need to log out and back in for group changes to take effect."
             fi
 
-            # Pull images and deploy with sudo if needed
-            if ! docker info > /dev/null 2>&1; then
-              echo "Using sudo for docker commands..."
-              sudo docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+            # Verify socket permissions
+            if [ ! -S /var/run/docker.sock ]; then
+              echo "Docker socket not found. Checking if Docker is running..."
+              sudo systemctl status docker
+              echo "Attempting to start Docker..."
+              sudo systemctl start docker
+            fi
+
+            # Check if we can access Docker without sudo
+            if ! docker info &> /dev/null; then
+              echo "Using sudo for Docker commands due to permission issues..."
+
+              # Login to GitHub Container Registry with sudo
+              echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+              # Pull and deploy with sudo
               sudo docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
               sudo docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
+
+              # Clean up with sudo
               sudo docker system prune -af
             else
-              docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+              # Normal flow if permissions are correct
+              echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
               docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod pull
               docker compose -f .docker/compose.yaml -p svnfrs-portfolio --profile prod up -d
               docker system prune -af
